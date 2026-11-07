@@ -256,6 +256,21 @@ class QRLogin:
         return base64.b64encode(bytes(raw)).decode("ascii")
 
 
+def extract_userid(cookie: str) -> int | None:
+    """从登录后的 Cookie 里取出账号 userid（user_heybox_id 优先）。"""
+    values: dict[str, str] = {}
+    for part in cookie.split(";"):
+        name, separator, value = part.strip().partition("=")
+        if separator:
+            values.setdefault(name.strip(), value.strip())
+
+    for key in ("user_heybox_id", "heybox_id", "userid"):
+        raw = values.get(key, "")
+        if raw.isdigit():
+            return int(raw)
+    return None
+
+
 def render_qr(console, qr_url: str, png_path: Path) -> Path | None:
     """终端里画二维码，并在有 Pillow 时保存 PNG；返回实际保存的路径。"""
     try:

@@ -62,7 +62,7 @@ def test_empty_reason_distinguishes_three_cases():
     )
     too_early = empty_reason(cached, _ts(2019, 1, 1), _ts(2019, 12, 31))
     assert "早于本地最早缓存" in too_early
-    assert "补全更早" in too_early
+    assert "全量同步" in too_early
 
     too_late = empty_reason(cached, _ts(2025, 1, 1), _ts(2025, 12, 31))
     assert "晚于最新一条" in too_late

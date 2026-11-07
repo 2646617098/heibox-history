@@ -74,6 +74,25 @@ class HeyboxClient:
             self._sleep(wait + random.uniform(0, self.jitter))
         self._last = _time.monotonic()
 
+    def fetch_image(self, url: str) -> tuple[bytes, str]:
+        """下载一张封面图，返回 (内容, Content-Type)。
+
+        图片走图床，不参与接口的限速/验证码逻辑；失败只影响这一条帖子的封面，
+        由调用方决定是否忽略，所以这里不重试，直接抛 NetworkError。
+        """
+        try:
+            response = self._client.get(
+                url, headers={"Accept": "image/*, */*"}, follow_redirects=True
+            )
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise NetworkError(f"图片下载失败：{exc}") from exc
+        if response.status_code != 200:
+            raise NetworkError(f"图片 HTTP {response.status_code}")
+        data = response.content
+        if not data:
+            raise NetworkError("图片内容为空")
+        return data, response.headers.get("content-type", "")
+
     def fetch_page(self, userid: int, offset: int, limit: int = DEFAULT_LIMIT) -> Page:
         if not 0 < limit <= MAX_LIMIT:
             limit = MAX_LIMIT
@@ -143,6 +162,11 @@ class HeyboxClient:
             if isinstance(topic, dict) and topic.get("name")
         )
 
+        # 视频帖可能没有 imgs，用 video_thumb 兜底；两者都没有就保持空串，
+        # 界面会显示默认占位图。
+        image_url = _first_url(item.get("imgs")) or _first_url(item.get("video_thumb"))
+        thumb = _first_url(item.get("thumbs")) or image_url
+
         return Post(
             linkid=linkid,
             userid=_as_int(item.get("userid")),
@@ -155,6 +179,8 @@ class HeyboxClient:
             click=_as_int(item.get("click")),
             comment_num=_as_int(item.get("comment_num")),
             like_num=_opt_int(item.get("link_award_num")),
+            thumb_url=thumb,
+            image_url=image_url,
         )
 
 
@@ -181,3 +207,14 @@ def _opt_int(value: object) -> int | None:
     if value is None:
         return None
     return _as_int(value)
+
+
+def _first_url(value: object) -> str:
+    """imgs/thumbs 是字符串数组，偶尔也可能是单个字符串。"""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                return item.strip()
+    return ""

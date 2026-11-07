@@ -54,7 +54,7 @@ def empty_reason(coverage: Coverage, start: int, end: int) -> str:
     if coverage.oldest is not None and end < coverage.oldest:
         return (
             f"该范围早于本地最早缓存（{format_date(coverage.oldest)}），"
-            "点「补全更早」继续往前回填。"
+            "点「全量同步」继续往前回填。"
         )
     if coverage.newest is not None and start > coverage.newest:
         return f"该范围晚于最新一条（{format_date(coverage.newest)}），这段时间没有帖子。"

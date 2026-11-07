@@ -76,6 +76,55 @@ def test_like_count_round_trip(store, post_factory):
     assert store.get_post(1).like_num == 9
 
 
+def test_cover_urls_and_image_file_round_trip(store, post_factory):
+    store.upsert_posts(
+        [
+            post_factory(
+                1,
+                100,
+                thumb_url="https://img.example.com/t.jpg",
+                image_url="https://img.example.com/f.jpg",
+            )
+        ]
+    )
+
+    post = store.get_post(1)
+    assert post.thumb_url == "https://img.example.com/t.jpg"
+    assert post.image_url == "https://img.example.com/f.jpg"
+    assert post.image_file == ""
+
+    store.set_image_file(1, "images/full/1.webp")
+    assert store.get_post(1).image_file == "images/full/1.webp"
+    assert store.image_files([1, 2]) == {1: "images/full/1.webp"}
+
+    # 后续同步只更新接口字段，不能把本地原图路径覆盖掉
+    store.upsert_posts([post_factory(1, 100, thumb_url="https://img.example.com/t2.jpg")])
+    assert store.get_post(1).image_file == "images/full/1.webp"
+    assert store.get_post(1).thumb_url == "https://img.example.com/t2.jpg"
+
+
+def test_image_files_with_empty_input(store):
+    assert store.image_files([]) == {}
+
+
+def test_thumb_sources_and_missing_url_count(store, post_factory):
+    store.upsert_posts(
+        [
+            post_factory(1, 100, thumb_url="https://img.example.com/1.jpg"),
+            post_factory(2, 200),
+            post_factory(3, 300, thumb_url="https://img.example.com/3.jpg"),
+        ]
+    )
+
+    # 按时间倒序，方便补图时先补最近的
+    assert store.thumb_sources(7) == [
+        (3, "https://img.example.com/3.jpg"),
+        (1, "https://img.example.com/1.jpg"),
+    ]
+    assert store.count_without_thumb_url(7) == 1
+    assert store.count_without_thumb_url(8) == 0
+
+
 def test_migrates_database_created_before_like_column(tmp_path):
     import sqlite3
 
@@ -106,6 +155,9 @@ def test_migrates_database_created_before_like_column(tmp_path):
         old = instance.get_post(1)
         assert old is not None
         assert old.like_num is None  # 老数据没有点赞信息
+        assert old.thumb_url == ""
+        assert old.image_url == ""
+        assert old.image_file == ""
 
         instance.upsert_posts([Post(linkid=1, userid=7, create_at=100, like_num=3)])
         assert instance.get_post(1).like_num == 3

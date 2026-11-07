@@ -14,8 +14,9 @@ from rich.console import Console
 from . import __version__
 from . import config as cfgmod
 from .api import HeyboxClient
-from .errors import CaptchaRequired, ConfigError, HeiboxError
-from .login import QRLogin, render_qr
+from .errors import CaptchaRequired, ConfigError, HeiboxError, LoginError
+from .images import ImageCache
+from .login import QRLogin, extract_userid, render_qr
 from .ranges import format_date, format_ts, parse_range
 from .render import human_ago, posts_as_json, render_posts
 from .store import Store
@@ -109,8 +110,8 @@ def login(
     timeout: int = typer.Option(180, "--timeout", min=30, help="二维码等待秒数"),
     interval: float = typer.Option(2.0, "--interval", min=1.0, help="轮询间隔（秒）"),
 ) -> None:
-    """用小黑盒 App 扫码登录，保存 Cookie。"""
-    config = _require_config(ctx)
+    """用小黑盒 App 扫码登录，自动绑定账号并保存 Cookie。"""
+    config = cfgmod.load_config(ctx.obj.data_dir)
     qr_path = ctx.obj.data_dir / "qrcode.png"
 
     def on_qr(qr_url: str) -> None:
@@ -130,6 +131,22 @@ def login(
         with QRLogin(timeout=timeout, interval=interval, on_qr=on_qr, on_state=on_state) as qr:
             cookie, nickname = qr.run()
 
+        userid = extract_userid(cookie)
+        if userid is None:
+            raise LoginError(
+                "登录成功，但 Cookie 里没有 user_heybox_id；请用 heibox init --userid 手动绑定"
+            )
+
+        if config is not None and config.userid != userid:
+            raise ConfigError(
+                f"当前绑定的是 userid={config.userid}，扫码账号是 {userid}；"
+                "如需切换账号，请换一个 --data-dir 或先删除 config.toml"
+            )
+
+        if config is None:
+            config = cfgmod.Config(userid=userid)
+            console.print(f"已自动识别账号：userid={userid}")
+
         config.cookie = cookie
         cfgmod.save_config(ctx.obj.data_dir, config)
         suffix = f"（{nickname}）" if nickname else ""
@@ -137,18 +154,18 @@ def login(
 
         try:
             with HeyboxClient(interval=0, cookie=cookie) as client:
-                page = client.fetch_page(config.userid, 0)
+                page = client.fetch_page(userid, 0)
         except CaptchaRequired as exc:
             err_console.print(
                 f"[yellow]Cookie 已保存，但资料接口仍要求验证：{exc}；稍后再同步。[/yellow]"
             )
             raise typer.Exit(4)
 
-        if page.profile_userid and page.profile_userid != config.userid:
+        if page.profile_userid and page.profile_userid != userid:
             config.cookie = ""
             cfgmod.save_config(ctx.obj.data_dir, config)
             raise ConfigError(
-                f"扫码登录的是 userid={page.profile_userid}，与配置的 {config.userid} 不一致；已丢弃 Cookie"
+                f"扫码登录的是 userid={page.profile_userid}，与识别出的 {userid} 不一致；已丢弃 Cookie"
             )
 
         console.print(f"验证通过 · 接口当前可见 {page.post_link_num} 条帖子")
@@ -216,22 +233,44 @@ def sync(
     rewalk: bool = typer.Option(
         False, "--rewalk", help="从 offset 0 重扫全量，补齐被列表临时过滤掉的条目"
     ),
+    images: str | None = typer.Option(
+        None, "--images", help="图片档位：off / thumb / full（会写入配置）"
+    ),
 ) -> None:
     """同步帖子到本地。"""
     try:
         config = _require_config(ctx)
+        if images is not None:
+            mode = images.strip().lower()
+            if mode not in cfgmod.IMAGE_MODE_LABELS:
+                raise ConfigError("--images 只能是 off / thumb / full")
+            config.image_mode = mode
+            cfgmod.save_config(ctx.obj.data_dir, config)
+            console.print(f"图片下载：{cfgmod.IMAGE_MODE_LABELS[mode]}")
         with _open_store(ctx, config) as store, _client(config) as client:
             if rewalk:
                 state = store.load_state(config.userid)
                 state.next_offset = 0
                 state.reached_end = False
                 store.save_state(state)
-            syncer = Syncer(store, client, config.userid, log=_log)
+            syncer = Syncer(
+                store,
+                client,
+                config.userid,
+                log=_log,
+                image_mode=config.image_mode,
+                images=ImageCache(ctx.obj.data_dir),
+            )
             report = syncer.sync_full() if (full or rewalk) else syncer.sync_latest()
         suffix = " · 已到最早" if report.reached_end else ""
+        image_note = ""
+        if report.images or report.images_failed:
+            image_note = f" · 图片 {report.images} 张"
+            if report.images_failed:
+                image_note += f"（失败 {report.images_failed}）"
         console.print(
             f"完成：{report.pages} 页 · 新收录 [bold]{report.inserted}[/bold] 条"
-            f" · 更新 {report.updated} 条{suffix}"
+            f" · 更新 {report.updated} 条{image_note}{suffix}"
         )
     except (HeiboxError, OSError) as exc:
         _fail(exc)
@@ -265,7 +304,14 @@ def list_posts(
             if not no_sync:
                 try:
                     with _client(config) as client:
-                        Syncer(store, client, config.userid, log=_log).ensure_range(start, end)
+                        Syncer(
+                            store,
+                            client,
+                            config.userid,
+                            log=_log,
+                            image_mode=config.image_mode,
+                            images=ImageCache(ctx.obj.data_dir),
+                        ).ensure_range(start, end)
                 except CaptchaRequired as exc:
                     err_console.print(
                         f"[yellow]接口要求人机验证（{exc}），本次只展示本地已有缓存。[/yellow]"
@@ -350,6 +396,7 @@ def status(ctx: typer.Context) -> None:
         console.print(f"缓存条数  : {coverage.total}")
         has_cookie = bool(os.environ.get("HEIBOX_COOKIE") or config.cookie)
         console.print(f"登录态    : {'已配置 Cookie' if has_cookie else '未配置（匿名）'}")
+        console.print(f"图片下载  : {cfgmod.IMAGE_MODE_LABELS[config.image_mode]}")
         console.print(f"时间覆盖  : {oldest} ~ {newest}（{end_note}）")
         console.print(f"最近同步  : {human_ago(coverage.last_sync_at)}")
         console.print(f"数据库    : {database}（{size_kb:.0f} KB）")

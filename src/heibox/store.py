@@ -27,7 +27,10 @@ CREATE TABLE IF NOT EXISTS posts (
     link_type   INTEGER NOT NULL DEFAULT 0,
     click       INTEGER NOT NULL DEFAULT 0,
     comment_num INTEGER NOT NULL DEFAULT 0,
-    like_num    INTEGER
+    like_num    INTEGER,
+    thumb_url   TEXT NOT NULL DEFAULT '',
+    image_url   TEXT NOT NULL DEFAULT '',
+    image_file  TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS ix_posts_time ON posts(userid, create_at DESC);
@@ -45,8 +48,8 @@ CREATE TABLE IF NOT EXISTS sync_state (
 """
 
 UPSERT_POST = """
-INSERT INTO posts (linkid, userid, create_at, title, description, topics, url, link_type, click, comment_num, like_num)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO posts (linkid, userid, create_at, title, description, topics, url, link_type, click, comment_num, like_num, thumb_url, image_url)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(linkid) DO UPDATE SET
     title       = excluded.title,
     description = excluded.description,
@@ -55,7 +58,9 @@ ON CONFLICT(linkid) DO UPDATE SET
     link_type   = excluded.link_type,
     click       = excluded.click,
     comment_num = excluded.comment_num,
-    like_num    = excluded.like_num
+    like_num    = excluded.like_num,
+    thumb_url   = excluded.thumb_url,
+    image_url   = excluded.image_url
 """
 
 UPSERT_STATE = """
@@ -85,8 +90,15 @@ class Store:
     def _migrate(self) -> None:
         """老版本数据库补列：CREATE TABLE IF NOT EXISTS 不会改已有表结构。"""
         columns = {row["name"] for row in self._db.execute("PRAGMA table_info(posts)")}
-        if "like_num" not in columns:
-            self._db.execute("ALTER TABLE posts ADD COLUMN like_num INTEGER")
+        additions = (
+            ("like_num", "INTEGER"),
+            ("thumb_url", "TEXT NOT NULL DEFAULT ''"),
+            ("image_url", "TEXT NOT NULL DEFAULT ''"),
+            ("image_file", "TEXT NOT NULL DEFAULT ''"),
+        )
+        for name, ddl in additions:
+            if name not in columns:
+                self._db.execute(f"ALTER TABLE posts ADD COLUMN {name} {ddl}")
 
     def close(self) -> None:
         self._db.close()
@@ -141,6 +153,8 @@ class Store:
                     post.click,
                     post.comment_num,
                     post.like_num,
+                    post.thumb_url,
+                    post.image_url,
                 )
                 for post in batch
             ],
@@ -171,6 +185,42 @@ class Store:
     def get_post(self, linkid: int) -> Post | None:
         row = self._db.execute("SELECT * FROM posts WHERE linkid = ?", (linkid,)).fetchone()
         return _row_to_post(row) if row else None
+
+    def image_files(self, linkids: Iterable[int]) -> dict[int, str]:
+        """一次查出这批帖子的原图本地路径，避免同步时逐条查库。"""
+        ids = [int(linkid) for linkid in linkids]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" * len(ids))
+        rows = self._db.execute(
+            f"SELECT linkid, image_file FROM posts WHERE linkid IN ({placeholders})", ids
+        )
+        return {int(row["linkid"]): row["image_file"] or "" for row in rows}
+
+    def set_image_file(self, linkid: int, relative: str) -> None:
+        self._db.execute(
+            "UPDATE posts SET image_file = ? WHERE linkid = ?", (relative, int(linkid))
+        )
+        self._db.commit()
+
+    def thumb_sources(self, userid: int) -> list[tuple[int, str]]:
+        """所有存了封面地址的帖子，按时间倒序；批量补图用。"""
+        rows = self._db.execute(
+            "SELECT linkid, thumb_url FROM posts "
+            "WHERE userid = ? AND thumb_url <> '' "
+            "ORDER BY create_at DESC, linkid DESC",
+            (userid,),
+        ).fetchall()
+        return [(int(row["linkid"]), row["thumb_url"]) for row in rows]
+
+    def count_without_thumb_url(self, userid: int) -> int:
+        """还没抓到封面地址的帖子数（通常是加图片功能之前同步的旧数据）。"""
+        row = self._db.execute(
+            "SELECT COUNT(*) AS total FROM posts "
+            "WHERE userid = ? AND (thumb_url IS NULL OR thumb_url = '')",
+            (userid,),
+        ).fetchone()
+        return int(row["total"])
 
     # ---- 同步状态 -------------------------------------------------
 
@@ -255,4 +305,7 @@ def _row_to_post(row: sqlite3.Row) -> Post:
         click=row["click"],
         comment_num=row["comment_num"],
         like_num=row["like_num"],
+        thumb_url=row["thumb_url"],
+        image_url=row["image_url"],
+        image_file=row["image_file"],
     )

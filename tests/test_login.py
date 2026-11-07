@@ -7,7 +7,15 @@ import respx
 from rich.console import Console
 
 from heibox.errors import LoginError
-from heibox.login import BASE_API, QR_STATE_PATH, QR_URL_PATH, QRLogin, Signer, render_qr
+from heibox.login import (
+    BASE_API,
+    QR_STATE_PATH,
+    QR_URL_PATH,
+    QRLogin,
+    Signer,
+    extract_userid,
+    render_qr,
+)
 
 
 def route(path: str):
@@ -22,6 +30,17 @@ def test_signer_output_shape():
     assert len(keys.hkey) == 7
     assert keys.hkey[-2:].isdigit()
     assert keys.time > 0
+
+
+def test_extract_userid_prefers_user_heybox_id():
+    cookie = "user_pkey=x; user_heybox_id=20475763; heybox_id=999"
+    assert extract_userid(cookie) == 20475763
+
+
+def test_extract_userid_falls_back_and_tolerates_junk():
+    assert extract_userid("heybox_id=123; foo=bar") == 123
+    assert extract_userid("user_heybox_id=abc; heybox_id=456") == 456
+    assert extract_userid("user_pkey=x") is None
 
 
 def test_render_qr_prints_terminal_blocks(tmp_path):

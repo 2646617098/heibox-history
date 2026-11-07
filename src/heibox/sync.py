@@ -6,7 +6,9 @@ import time
 from typing import Callable
 
 from .api import DEFAULT_LIMIT, HeyboxClient
-from .models import Page, SyncReport, SyncState
+from .errors import HeiboxError
+from .images import ImageCache, thumb_url
+from .models import Page, Post, SyncReport, SyncState
 from .store import Store
 
 Logger = Callable[[str], None] | None
@@ -15,6 +17,38 @@ Logger = Callable[[str], None] | None
 MAX_PAGES = 500
 # 最近 10 分钟内同步过，就不再为了“查今天”而重复请求
 RECENT_TTL = 600
+# 图片档位：off 不下载，thumb 只存列表缩略图，full 再额外存每帖首张原图
+IMAGE_MODES = ("off", "thumb", "full")
+
+Progress = Callable[[int, int, int, int], None] | None
+
+
+def download_thumbnails(
+    client: HeyboxClient,
+    images: ImageCache,
+    sources: list[tuple[int, str]],
+    *,
+    on_progress: Progress = None,
+) -> tuple[int, int]:
+    """按 (linkid, 封面地址) 批量补缩略图，返回 (成功, 失败)。
+
+    只请求图床，不碰帖子列表接口；单张失败继续，交给下次重试。
+    """
+    saved = failed = 0
+    total = len(sources)
+    for index, (linkid, source) in enumerate(sources, 1):
+        try:
+            data, _ctype = client.fetch_image(thumb_url(source))
+            ok = images.save_thumb(linkid, data)
+        except (HeiboxError, OSError):
+            ok = False
+        if ok:
+            saved += 1
+        else:
+            failed += 1
+        if on_progress is not None and (index == total or index % 5 == 0):
+            on_progress(index, total, saved, failed)
+    return saved, failed
 
 
 class Syncer:
@@ -26,6 +60,8 @@ class Syncer:
         *,
         limit: int = DEFAULT_LIMIT,
         log: Logger = None,
+        image_mode: str = "off",
+        images: ImageCache | None = None,
         now: Callable[[], float] = time.time,
     ) -> None:
         self.store = store
@@ -33,6 +69,8 @@ class Syncer:
         self.userid = userid
         self.limit = limit
         self.log = log
+        self.image_mode = image_mode if image_mode in IMAGE_MODES else "off"
+        self.images = images
         self._now = now
 
     # ---- 内部 -----------------------------------------------------
@@ -48,11 +86,54 @@ class Syncer:
         report.fetched += len(page.posts)
         report.inserted += inserted
         report.updated += updated
+        saved, failed = self._cache_images(page.posts)
+        report.images += saved
+        report.images_failed += failed
         self.store.refresh_bounds(self.userid)
+        image_note = ""
+        if self.image_mode != "off" and (saved or failed):
+            image_note = f" · 图 +{saved}" + (f"（失败 {failed}）" if failed else "")
         self._log(
-            f"offset={offset} · 本页 {len(page.posts)} 条 · 新收录 {inserted} 条 · 累计 {report.inserted} 条"
+            f"offset={offset} · 本页 {len(page.posts)} 条 · 新收录 {inserted} 条"
+            f" · 累计 {report.inserted} 条{image_note}"
         )
         return page, inserted
+
+    def _cache_images(self, posts: tuple[Post, ...]) -> tuple[int, int]:
+        """按当前档位把封面写到本地；单张失败只计数，不打断同步。"""
+        if self.images is None or self.image_mode == "off" or not posts:
+            return (0, 0)
+
+        existing_full = self.store.image_files([post.linkid for post in posts])
+        saved = failed = 0
+
+        for post in posts:
+            if post.thumb_url and not self.images.has_thumb(post.linkid):
+                try:
+                    data, _ctype = self.client.fetch_image(thumb_url(post.thumb_url))
+                except (HeiboxError, OSError):
+                    failed += 1
+                else:
+                    if self.images.save_thumb(post.linkid, data):
+                        saved += 1
+                    else:
+                        failed += 1
+
+            if (
+                self.image_mode == "full"
+                and post.image_url
+                and not existing_full.get(post.linkid)
+            ):
+                try:
+                    data, ctype = self.client.fetch_image(post.image_url)
+                    relative = self.images.save_full(post.linkid, data, ctype)
+                except (HeiboxError, OSError):
+                    failed += 1
+                else:
+                    self.store.set_image_file(post.linkid, relative)
+                    saved += 1
+
+        return saved, failed
 
     def _advance(self, state: SyncState, offset: int, page: Page) -> None:
         state.next_offset = max(state.next_offset, offset)

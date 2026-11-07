@@ -13,6 +13,27 @@ from pathlib import Path
 
 from .errors import ConfigError
 
+# 图片下载档位：off 不下载，thumb 只存列表缩略图，full 再额外存每帖首张原图。
+IMAGE_MODE_LABELS = {
+    "off": "不下载",
+    "thumb": "仅缩略图",
+    "full": "缩略图 + 原图",
+}
+
+
+def normalize_image_mode(value: object) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in IMAGE_MODE_LABELS else "off"
+
+
+def as_bool(value: object, default: bool = True) -> bool:
+    """TOML 里是真正的 bool；容忍手写成 "false"/"0" 这类字符串。"""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in {"", "0", "false", "no", "off"}
+
 
 @dataclass
 class Config:
@@ -20,6 +41,10 @@ class Config:
     request_interval: float = 3.0
     # 可选：浏览器里通过人机验证后的 Cookie，仅在接口要求验证时需要
     cookie: str = ""
+    # 同步时是否顺带下载封面图；默认关闭，避免第一次全量就拉几百张图
+    image_mode: str = "off"
+    # 列表是否显示封面列；关掉后行高变矮，一页能看到更多条目
+    show_thumbs: bool = True
 
 
 def data_dir() -> Path:
@@ -63,6 +88,8 @@ def load_config(directory: Path) -> Config | None:
             userid=int(raw["userid"]),
             request_interval=float(raw.get("request_interval", 3.0)),
             cookie=str(raw.get("cookie", "")),
+            image_mode=normalize_image_mode(raw.get("image_mode", "off")),
+            show_thumbs=as_bool(raw.get("show_thumbs"), True),
         )
     except (tomllib.TOMLDecodeError, UnicodeDecodeError, KeyError, TypeError, ValueError) as exc:
         raise ConfigError(f"配置文件无法解析：{path}（{exc}）") from exc
@@ -70,9 +97,12 @@ def load_config(directory: Path) -> Config | None:
 
 def save_config(directory: Path, config: Config) -> None:
     directory.mkdir(parents=True, exist_ok=True)
+    mode = normalize_image_mode(config.image_mode)
     lines = [
         f"userid = {config.userid}",
         f"request_interval = {config.request_interval}",
+        f'image_mode = "{mode}"',
+        f"show_thumbs = {'true' if config.show_thumbs else 'false'}",
     ]
     if config.cookie:
         lines.append(f"cookie = {json.dumps(config.cookie)}")

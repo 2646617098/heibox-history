@@ -33,7 +33,22 @@ def test_page_count(total: int, expected: int) -> None:
     assert gui.page_count(total) == expected
 
 
+def test_range_text_shows_unbounded_and_full_ranges() -> None:
+    assert gui.range_text("", "") == "全部时间"
+    assert gui.range_text(" ", "  ") == "全部时间"
+    assert gui.range_text("2024-01-01", "2024-12-31") == "2024-01-01 ~ 2024-12-31"
+    assert gui.range_text("2024-01-01", "") == "2024-01-01 ~ 不限"
+    assert gui.range_text("", "2024-12-31") == "不限 ~ 2024-12-31"
+
+
 def test_range_label_collapses_single_day():
     day = int(datetime(2024, 3, 5, tzinfo=TZ).timestamp())
     assert gui.range_label(day, day + 3600) == "2024-03-05"
     assert gui.range_label(day, day + 86400 * 3) == "2024-03-05 ~ 2024-03-08"
+
+
+def test_image_mode_text_has_short_labels():
+    assert gui.image_mode_text("off") == "不下载"
+    assert gui.image_mode_text("thumb") == "缩略图"
+    assert gui.image_mode_text("full") == "缩略+原图"
+    assert gui.image_mode_text("unknown") == "不下载"

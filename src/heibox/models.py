@@ -20,6 +20,12 @@ class Post:
     # 点赞数。小黑盒列表接口里叫 link_award_num，网页端 👍 图标显示的就是它。
     # None 表示这条记录是在加这个字段之前抓的、还没补数据（不是 0 赞）。
     like_num: int | None = None
+    # 封面地址：thumb_url 来自接口的 thumbs（列表小图），image_url 来自 imgs（原图）。
+    # 地址只存下来，是否真的下载由配置里的 image_mode 决定。
+    thumb_url: str = ""
+    image_url: str = ""
+    # 原图下载到本地后的相对路径（相对数据目录）；没下载时为空。
+    image_file: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +62,9 @@ class SyncReport:
     inserted: int = 0
     updated: int = 0
     reached_end: bool = False
+    # 本次真正写入磁盘的图片数（缩略图/原图分别算一张）与失败数
+    images: int = 0
+    images_failed: int = 0
 
     def merge(self, other: "SyncReport") -> None:
         self.pages += other.pages
@@ -63,3 +72,5 @@ class SyncReport:
         self.inserted += other.inserted
         self.updated += other.updated
         self.reached_end = self.reached_end or other.reached_end
+        self.images += other.images
+        self.images_failed += other.images_failed
