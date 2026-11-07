@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "heibox-history"
+version = "0.1.0"
+description = "本地索引自己的小黑盒帖子，支持按时间范围查询"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "typer>=0.12",
+    "rich>=13.7",
+    "qrcode>=7.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "respx>=0.21",
+]
+build = [
+    "pyinstaller>=6.11",
+]
+
+[project.scripts]
+heibox = "heibox.cli:app"
+heibox-gui = "heibox.gui:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "network: 会访问真实的小黑盒接口（默认跳过）",
+]
